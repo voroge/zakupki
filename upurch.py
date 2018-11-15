@@ -21,8 +21,10 @@ class PurchTools(object):
     def __init__(self):
         # Для корректного отображения оракловых сообщений
         os.environ['NLS_LANG'] = 'AMERICAN_AMERICA.AL32UTF8'
-        self.gdebug = False
+        self.gdebug = True
         self.__config = self.__loadconfig()
+        self.conn=None
+        self.cursor=None
 
     def log(self, amessage):
         if self.gdebug:
@@ -112,6 +114,17 @@ class PurchTools(object):
         else:
             return float(atag_value[0].text)
 
+    def __xpath_composite(self, aelements):
+        llist = list()
+        for index, value in enumerate(aelements):
+            if value.text.strip() == '':
+                llist.append(dict())
+            else:
+                llist[len(llist) - 1][value.tag[value.tag.find('}') + 1:]] = value.text.strip()
+            if index == len(aelements) - 1:
+                dict(llist[len(llist) - 1])
+        return llist
+
     # Функция парсинга xml
     def parse_xml(self, afile, adoc):
         # парсим файл XML и создаем дерево елементов element tree
@@ -136,9 +149,17 @@ class PurchTools(object):
                 root.xpath('.//ns2:purchaseInfo/ns:purchaseNoticeNumber', namespaces=lnamespaces)[0].text,
                 root.xpath('.//ns2:purchaseInfo/ns:purchaseMethodCode', namespaces=lnamespaces)[0].text,
                 root.xpath('.//ns2:purchaseInfo/ns:purchaseCodeName', namespaces=lnamespaces)[0].text,
-                [s.text for s in root.xpath(
-                    './/ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:name',
-                    namespaces=lnamespaces)],
+                self.__xpath_composite(
+                    root.xpath(
+                        './/ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo | \
+                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:name | \
+                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:inn | \
+                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:kpp | \
+                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:ogrn | \
+                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:address',
+                        namespaces=lnamespaces
+                    )
+                ),
             ]
         # Альтернативная xpath функция, но с меньшими возможностями и немного отличным синтаксисом поискового запроса
         # lm = root.findall('.//{http://zakupki.gov.ru/223fz/contract/1}contractRegNumber')
@@ -229,11 +250,99 @@ class PurchTools(object):
         else:
             return llist
 
+    # Блок подготовки и проверки SQL команды
+    def insert_prepare(self, asql, acursor):
+        try:
+            acursor.prepare(asql)
+        except cx_Oracle.DatabaseError as e:
+            self.log('Ошибка! Не возможно приготовить курсор (' + str(e.message) + ')')
+            self.log(asql)
+            exit(1)
+
+
+    def oraconnect(self, aconstr):
+        self.conn = cx_Oracle.connect(aconstr)
+        self.cursor = self.conn.cursor()
+
+    def oradisc(self):
+        self.cursor.close()
+        self.conn.close()
+
+    def load_from_ora(self, asql):
+        try:
+            if self.cursor.statement != asql:
+                self.insert_prepare(asql, self.cursor)
+            self.cursor.execute(self.cursor.statement)
+            ltable = self.cursor.fetchall()
+            # получаем названия полей запроса
+            lcols = [col_desc[0] for col_desc in self.cursor.description]
+        except cx_Oracle.DatabaseError as e:
+            self.log('Ошибка! Не возможно выгрузить данные (' + str(e.message) + ')')
+            self.log(self.cursor.statement)
+            self.oradisc()
+            exit(1)
+        df = pd.DataFrame(ltable, columns=lcols)
+        return df
+
+    def save_to_ora(self, asql, abindvar):
+        try:
+            if self.cursor.statement != asql:
+                self.insert_prepare(asql, self.cursor)
+            self.cursor.execute(self.cursor.statement, abindvar)
+            ltable = self.cursor.fetchall()
+        except cx_Oracle.DatabaseError as e:
+            self.log('Ошибка! Не возможно вставить строку (' + str(e.message) + ')')
+            self.log(self.cursor.statement)
+            self.log(', '.join([str(s) for s in abindvar.values()]))
+            self.oradisc()
+            exit(1)
+
+    # def load_df_to_ora(adf):
+    #     conn = cx_Oracle.connect('analytics/analytics@fst_rac')
+    #     cursor = conn.cursor()
+    #     try:
+    #         isql = """
+    #                   INSERT INTO ZAKUPKI_PROTOKOLVK
+    #                   (nnumber, mcode, mname, nsupplier, ncount, zip, nxml, nregion)
+    #                   VALUES (:s_nnumber, :s_mcode, :s_mname, :s_nsupplier, :s_ncount, :s_zip, :s_nxml, :s_nregion)
+    #                """
+    #         # Блок подготовки и проверки SQL команды
+    #         for i in range(len(adf.index)):
+    #             # if adf['NOTICENUM'][i]=='NULL':
+    #             insert_prepare(isql, cursor)
+    #             # else:
+    #             #    insert_prepare(usql,cursor)
+    #             try:
+    #                 # Выполнение Insert
+    #                 cursor.execute(cursor.statement, s_nnumber=adf['nnumber'][i],
+    #                                s_mcode=adf['mcode'][i], s_mname=adf['mname'][i],
+    #                                s_nsupplier=None, s_ncount=adf['ncount'][i],
+    #                                s_zip=adf['zip'][i], s_nxml=adf['xml'][i], s_nregion=adf['region'][i]
+    #                                )
+    #             except cx_Oracle.DatabaseError as exception:
+    #                 print('Failed to insert row')
+    #                 print(exception)
+    #                 print(cursor.statement)
+    #                 # print str(df['NYEAR'][i])+'|'+str(df['GROUP_NUMBER'][i])+'|'+str(df['GROUP_NAME'][i])+'|'+str(df['ORG_REG_NUMBER'][i])+'|'+str(df['ORG_NAME'][i])
+    #                 exit(1)
+    #             if (i > 0) and (i % 100 == 0):
+    #                 print(u' Обработано строк: ' + str(i))
+    #         conn.commit()
+    #     finally:
+    #         cursor.close()
+    #         conn.close()
+
     def loadxmltoora(self):
         lfz = 'docs223'
         lftpfz = 'ftp223'
+        lsql = """
+                   INSERT INTO ZAKUPKI_PROTOKOL 
+                   (nnumber, mcode, mname, nsupplier, ncount, zip, nxml, nregion) 
+                   VALUES (:s_nnumber, :s_mcode, :s_mname, :s_nsupplier, :s_ncount, :s_zip, :s_nxml, :s_nregion)
+               """
         self.log('***Старт загрузки***')
         try:
+            self.oraconnect('zakupki/dD9qHxQD3t5w@FST_RAC')
             for lval in self.__config.items(lfz):
                 ldoc = lfz + '.' + lval[0]
                 lreglist = self.getreglist(ldoc, lftpfz)
@@ -245,12 +354,25 @@ class PurchTools(object):
                                                   lval[0], self.__config.get(ldoc, 'datefrom'),
                                                   self.__config.get(ldoc, 'dateto'), lreglist)
                     # load_df_to_ora(contracts)
+                    for i in range(len(ldocs.index)):
+                        lbindvar=dict(
+                            s_nnumber=ldocs['nnumber'][i],
+                            s_mcode=ldocs['mcode'][i],
+                            s_mname=ldocs['mname'][i],
+                            s_nsupplier=None,
+                            s_ncount=ldocs['ncount'][i],
+                            s_zip=ldocs['zip'][i],
+                            s_nxml=ldocs['xml'][i],
+                            s_nregion=ldocs['region'][i]
+                        )
+                        #self.save_to_ora(lsql, lbindvar)
             return ldocs
         except configparser.NoOptionError as eo:
             self.log('Ошибка! Некорректный конфигурационный файл settings.ini (' + str(eo.message) + ')')
             exit(1)
         except Exception as e:
-            self.log('Ошибка! (' + str(e.message) +')')
+            self.log('Ошибка! (' + str(e) +')')
             exit(1)
         finally:
+            self.oradisc()
             self.log('***Окончание загрузки***')
