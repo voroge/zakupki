@@ -23,8 +23,9 @@ class PurchTools(object):
         os.environ['NLS_LANG'] = 'AMERICAN_AMERICA.AL32UTF8'
         self.gdebug = True
         self.__config = self.__loadconfig()
-        self.conn=None
-        self.cursor=None
+        self.conn = None
+        self.cursor = None
+        self.__maxdate = None
 
     def log(self, amessage):
         if self.gdebug:
@@ -48,6 +49,15 @@ class PurchTools(object):
         lconfig = configparser.ConfigParser()
         lconfig.read('settings.ini')
         return lconfig
+
+    def __saveconfig(self, asection, aoption, avalue):
+        try:
+            self.__config.set(asection, aoption, avalue)
+            # Вносим изменения в конфиг. файл.
+            with open('settings.ini', "w") as cfile:
+                self.__config.write(cfile)
+        except Exception as e:
+            self.log('Ошибка! (' + str(e) + ')')
 
     def ftpconnect(self, afz):
         # создаем объект ftp для заданного адреса ftp-сервера
@@ -146,17 +156,23 @@ class PurchTools(object):
         if adoc == 'purchaseprotocol':
             lnamespaces = {'ns2': 'http://zakupki.gov.ru/223fz/purchase/1', 'ns': 'http://zakupki.gov.ru/223fz/types/1'}
             ldocdata = [
+                self.__xpath_nulls(root.xpath('.//ns2:guid', namespaces=lnamespaces)),
+                self.__xpath_nulls(root.xpath('.//ns2:urlEIS', namespaces=lnamespaces)),
+                self.__xpath_nulls(root.xpath('.//ns2:registrationNumber', namespaces=lnamespaces)),
                 root.xpath('.//ns2:purchaseInfo/ns:purchaseNoticeNumber', namespaces=lnamespaces)[0].text,
                 root.xpath('.//ns2:purchaseInfo/ns:purchaseMethodCode', namespaces=lnamespaces)[0].text,
                 root.xpath('.//ns2:purchaseInfo/ns:purchaseCodeName', namespaces=lnamespaces)[0].text,
                 self.__xpath_composite(
                     root.xpath(
-                        './/ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo | \
+                        './/ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:lot | \
                          .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:name | \
                          .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:inn | \
                          .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:kpp | \
                          .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:ogrn | \
-                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:address',
+                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:address | \
+                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:winnerIndication | \
+                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:lot/ns2:ordinalNumber | \
+                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:lot/ns2:guid',
                         namespaces=lnamespaces
                     )
                 ),
@@ -171,6 +187,9 @@ class PurchTools(object):
             return False
         else:
             ldfile = afname[ifrom + 8:ifrom + 16]
+            if self.__maxdate == None \
+                    or self.__maxdate < dt.datetime.strptime(ldfile, '%Y%m%d'):
+                self.__maxdate = dt.datetime.strptime(ldfile, '%Y%m%d')
             if adfrom == '*' and adto != '*':
                 return dt.datetime.strptime(ldfile, '%Y%m%d') \
                        <= dt.datetime.strptime(adto, '%Y%m%d')
@@ -255,7 +274,7 @@ class PurchTools(object):
         try:
             acursor.prepare(asql)
         except cx_Oracle.DatabaseError as e:
-            self.log('Ошибка! Не возможно приготовить курсор (' + str(e.message) + ')')
+            self.log('Ошибка! Не возможно приготовить курсор (' + str(e) + ')')
             self.log(asql)
             exit(1)
 
@@ -277,7 +296,7 @@ class PurchTools(object):
             # получаем названия полей запроса
             lcols = [col_desc[0] for col_desc in self.cursor.description]
         except cx_Oracle.DatabaseError as e:
-            self.log('Ошибка! Не возможно выгрузить данные (' + str(e.message) + ')')
+            self.log('Ошибка! Не возможно выгрузить данные (' + str(e) + ')')
             self.log(self.cursor.statement)
             self.oradisc()
             exit(1)
@@ -289,9 +308,9 @@ class PurchTools(object):
             if self.cursor.statement != asql:
                 self.insert_prepare(asql, self.cursor)
             self.cursor.execute(self.cursor.statement, abindvar)
-            ltable = self.cursor.fetchall()
+            self.conn.commit()
         except cx_Oracle.DatabaseError as e:
-            self.log('Ошибка! Не возможно вставить строку (' + str(e.message) + ')')
+            self.log('Ошибка! Не возможно вставить строку (' + str(e) + ')')
             self.log(self.cursor.statement)
             self.log(', '.join([str(s) for s in abindvar.values()]))
             self.oradisc()
@@ -332,17 +351,70 @@ class PurchTools(object):
     #         cursor.close()
     #         conn.close()
 
+    def savedoctoora(self,adocs, adoctype):
+        if adoctype == 'purchaseprotocol':
+            lsql1 = """
+                   MERGE INTO PROTOCOLS p
+                   USING (SELECT :s_doctype as doctype, :s_urleis as urleis, :s_guid as guid, :s_regnumber as regnumber, 
+                                 :s_nnumber as nnumber, :s_mcode as mcode, :s_mname as mname, :s_ncount as ncount, 
+                                 :s_zip as zip, :s_nxml as nxml, :s_nregion as nregion FROM DUAL) v
+                   ON (p.nnumber=v.nnumber)
+                   WHEN MATCHED THEN
+                      UPDATE SET p.doctype = v.doctype, p.urleis = v.urleis, p.guid = v.guid, p.regnumber=v.regnumber, 
+                                 p.mcode = v.mcode, p.mname = v.mname, p.ncount = v.ncount, p.zip = v.zip,
+                                 p.nxml = v.nxml, p.nregion = v.nregion
+                   WHEN NOT MATCHED THEN
+                      INSERT (p.doctype, p.urleis, p.guid, p.regnumber, p.nnumber, p.mcode, p.mname, p.ncount, p.zip, p.nxml, p.nregion)
+                      VALUES (v.doctype, v.urleis, v.guid, v.regnumber, v.nnumber, v.mcode, v.mname, v.ncount, v.zip, v.nxml, v.nregion)
+                   """
+            lsql2 = """
+                   MERGE INTO SUPPLIERS p
+                   USING (SELECT :name as name, :inn as inn, :kpp as kpp, :ogrn as ogrn, :address as address, 
+                                 :winnerIndication as winnerind, :ordinalNumber as lotnumber, :guid as lotguid,
+                                 :protguid as protguid FROM DUAL) v
+                   ON (p.protguid=v.protguid and p.lotguid=v.lotguid and p.ogrn=v.ogrn)
+                   WHEN MATCHED THEN
+                      UPDATE SET p.name = v.name, p.inn = v.inn, p.kpp = v.kpp, p.address = v.address, 
+                                 p.winnerind = v.winnerind, p.lotnumber = v.lotnumber
+                   WHEN NOT MATCHED THEN
+                      INSERT (p.name, p.inn, p.kpp, p.ogrn, p.address, p.winnerind, p.lotnumber, p.lotguid, p.protguid)
+                      VALUES (v.name, v.inn, v.kpp, v.ogrn, v.address, v.winnerind, v.lotnumber, v.lotguid, v.protguid)
+                   """
+            for i in range(len(adocs.index)):
+                lbindvar = dict(
+                    s_doctype=2,
+                    s_guid=adocs['guid'][i],
+                    s_urleis=adocs['urleis'][i],
+                    s_regnumber=adocs['regnumber'][i],
+                    s_nnumber=adocs['nnumber'][i],
+                    s_mcode=adocs['mcode'][i],
+                    s_mname=adocs['mname'][i],
+                    s_ncount=adocs['ncount'][i],
+                    s_zip=adocs['zip'][i],
+                    s_nxml=adocs['xml'][i],
+                    s_nregion=adocs['region'][i]
+                )
+                self.save_to_ora(lsql1, lbindvar)
+                lsd = adocs['nsupplier'][i]
+                for sd in lsd:
+                    lbindvar = dict(
+                        name = sd.get('name',''),
+                        inn = sd.get('inn',''),
+                        kpp = sd.get('kpp',''),
+                        ogrn = sd.get('ogrn',''),
+                        address = sd.get('address',''),
+                        winnerIndication = sd.get('winnerind',''),
+                        ordinalNumber = sd.get('lotnumber',''),
+                        guid = sd.get('lotguid',''),
+                        protguid = adocs['guid'][i]
+                    )
+                    self.save_to_ora(lsql2, lbindvar)
+
     def loadxmltoora(self):
         lfz = 'docs223'
         lftpfz = 'ftp223'
-        lsql = """
-                   INSERT INTO ZAKUPKI_PROTOKOL 
-                   (nnumber, mcode, mname, nsupplier, ncount, zip, nxml, nregion) 
-                   VALUES (:s_nnumber, :s_mcode, :s_mname, :s_nsupplier, :s_ncount, :s_zip, :s_nxml, :s_nregion)
-               """
         self.log('***Старт загрузки***')
         try:
-            self.oraconnect('zakupki/dD9qHxQD3t5w@FST_RAC')
             for lval in self.__config.items(lfz):
                 ldoc = lfz + '.' + lval[0]
                 lreglist = self.getreglist(ldoc, lftpfz)
@@ -353,19 +425,11 @@ class PurchTools(object):
                                                   self.__config.get(ldoc, 'fields'),
                                                   lval[0], self.__config.get(ldoc, 'datefrom'),
                                                   self.__config.get(ldoc, 'dateto'), lreglist)
-                    # load_df_to_ora(contracts)
-                    for i in range(len(ldocs.index)):
-                        lbindvar=dict(
-                            s_nnumber=ldocs['nnumber'][i],
-                            s_mcode=ldocs['mcode'][i],
-                            s_mname=ldocs['mname'][i],
-                            s_nsupplier=None,
-                            s_ncount=ldocs['ncount'][i],
-                            s_zip=ldocs['zip'][i],
-                            s_nxml=ldocs['xml'][i],
-                            s_nregion=ldocs['region'][i]
-                        )
-                        #self.save_to_ora(lsql, lbindvar)
+            self.oraconnect('zakupki/dD9qHxQD3t5w@FST_RAC')
+            self.savedoctoora(ldocs,lval[0])
+            if self.__config.get(ldoc, 'dateto') == '*':
+                self.__saveconfig(ldoc,'datefrom',"{:%Y%m%d}".format(self.__maxdate))
+                self.__saveconfig(ldoc, 'dateto', '*')
             return ldocs
         except configparser.NoOptionError as eo:
             self.log('Ошибка! Некорректный конфигурационный файл settings.ini (' + str(eo.message) + ')')
