@@ -124,15 +124,29 @@ class PurchTools(object):
         else:
             return float(atag_value[0].text)
 
-    def __xpath_composite(self, aelements):
+    # функция обработки одноуровневых составных эелементов
+    def __xpath_composite_one_level(self, aelements):
         llist = list()
         for index, value in enumerate(aelements):
             if value.text.strip() == '':
                 llist.append(dict())
             else:
                 llist[len(llist) - 1][value.tag[value.tag.find('}') + 1:]] = value.text.strip()
-            if index == len(aelements) - 1:
-                dict(llist[len(llist) - 1])
+        return llist
+
+    # функция обработки двухуровневых составных эелементов
+    def __xpath_composite_two_level(self, aparentelements, achildelements):
+        lparlist = self.__xpath_composite_one_level(aparentelements)
+        llist = list()
+        nc = -1
+        for index, value in enumerate(achildelements):
+            if index < len(achildelements) - 1 and value.text.strip() == '':
+                if achildelements[index + 1].text.strip() == '':
+                    nc += 1
+                else:
+                    llist.append(lparlist[nc].copy())
+            else:
+                llist[len(llist) - 1][value.tag[value.tag.find('}') + 1:]] = value.text.strip()
         return llist
 
     # Функция парсинга xml
@@ -162,17 +176,26 @@ class PurchTools(object):
                 root.xpath('.//ns2:purchaseInfo/ns:purchaseNoticeNumber', namespaces=lnamespaces)[0].text,
                 root.xpath('.//ns2:purchaseInfo/ns:purchaseMethodCode', namespaces=lnamespaces)[0].text,
                 root.xpath('.//ns2:purchaseInfo/ns:purchaseCodeName', namespaces=lnamespaces)[0].text,
-                self.__xpath_composite(
+                self.__xpath_composite_two_level(
+                    # __xpath_list(
                     root.xpath(
                         './/ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:lot | \
+                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:lot/ns2:ordinalNumber | \
+                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:lot/ns2:guid',
+                        namespaces=lnamespaces
+                    ),
+                    root.xpath(
+                        #ns2:protocolLotApplications[ns2:application] - ищет все тэги protocolLotApplications,
+                        # для которых существует хотя бы один тэг application (нужно, чтобы отсеять,
+                        # когда не подана ни одна заявка)
+                        './/ns2:lotApplicationsList/ns2:protocolLotApplications[ns2:application]/ns2:lot | \
+                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo | \
                          .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:name | \
                          .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:inn | \
                          .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:kpp | \
                          .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:ogrn | \
                          .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:address | \
-                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:winnerIndication | \
-                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:lot/ns2:ordinalNumber | \
-                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:lot/ns2:guid',
+                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:winnerIndication',
                         namespaces=lnamespaces
                     )
                 ),
@@ -229,7 +252,6 @@ class PurchTools(object):
                     self.log('Всего файлов (архивов) в FTP каталоге: ' + str(len(lftplist)))
                     for f in lftplist:
                         if (f[-4:] == '.zip') and self.__compdate(f, adfrom, adto):
-                            self.log(f)
                             self.download(aftp, lpath, axmlpath, f)
                             i += 1
                             archlist = self.unzipall(axmlpath, f)
@@ -238,7 +260,6 @@ class PurchTools(object):
                             for x in archlist:
                                 # если файл не нулевой длины - парсим xml и загружаем данные в DataFrame
                                 if os.path.getsize(axmlpath + x) != 0:
-                                    self.log(x)
                                     doc = self.parse_xml(axmlpath + x, adoc)
                                     # Удаляем дубли в списке оквэд
                                     # добавляем имена файлов zip и xml в список
@@ -251,14 +272,14 @@ class PurchTools(object):
                                 # удаляем файл архива
                             os.remove(axmlpath + f)
                             if i % 100 == 0:
-                                self.log(' | Обработано ' + str(i) + ' файлов из ' + str(len(lftplist))
+                                self.log(' | Обработано ' + str(i) + ' файлов архивов из ' + str(len(lftplist))
                                          + ' (' + str(int(round(float(i) / len(lftplist) * 100))) + '%)')
                 except ftplib.error_perm:
                     self.log('Ошибка! В папке ' + s + ' каталог ' + aftp_dir + ' не существует!')
         # Могут досылать исправленные данные по контракту в разные дни. Это надо обрабатывать.
         docs = docs.drop_duplicates(['nnumber'], keep='last')
         docs.index = range(len(docs.index))
-        self.log(u'Окончание обработки:')
+        self.log(u'Окончание обработки.')
         return docs
 
     def getreglist(self, adoc, afz):
@@ -316,41 +337,6 @@ class PurchTools(object):
             self.oradisc()
             exit(1)
 
-    # def load_df_to_ora(adf):
-    #     conn = cx_Oracle.connect('analytics/analytics@fst_rac')
-    #     cursor = conn.cursor()
-    #     try:
-    #         isql = """
-    #                   INSERT INTO ZAKUPKI_PROTOKOLVK
-    #                   (nnumber, mcode, mname, nsupplier, ncount, zip, nxml, nregion)
-    #                   VALUES (:s_nnumber, :s_mcode, :s_mname, :s_nsupplier, :s_ncount, :s_zip, :s_nxml, :s_nregion)
-    #                """
-    #         # Блок подготовки и проверки SQL команды
-    #         for i in range(len(adf.index)):
-    #             # if adf['NOTICENUM'][i]=='NULL':
-    #             insert_prepare(isql, cursor)
-    #             # else:
-    #             #    insert_prepare(usql,cursor)
-    #             try:
-    #                 # Выполнение Insert
-    #                 cursor.execute(cursor.statement, s_nnumber=adf['nnumber'][i],
-    #                                s_mcode=adf['mcode'][i], s_mname=adf['mname'][i],
-    #                                s_nsupplier=None, s_ncount=adf['ncount'][i],
-    #                                s_zip=adf['zip'][i], s_nxml=adf['xml'][i], s_nregion=adf['region'][i]
-    #                                )
-    #             except cx_Oracle.DatabaseError as exception:
-    #                 print('Failed to insert row')
-    #                 print(exception)
-    #                 print(cursor.statement)
-    #                 # print str(df['NYEAR'][i])+'|'+str(df['GROUP_NUMBER'][i])+'|'+str(df['GROUP_NAME'][i])+'|'+str(df['ORG_REG_NUMBER'][i])+'|'+str(df['ORG_NAME'][i])
-    #                 exit(1)
-    #             if (i > 0) and (i % 100 == 0):
-    #                 print(u' Обработано строк: ' + str(i))
-    #         conn.commit()
-    #     finally:
-    #         cursor.close()
-    #         conn.close()
-
     def savedoctoora(self,adocs, adoctype):
         if adoctype == 'purchaseprotocol':
             lsql1 = """
@@ -403,12 +389,14 @@ class PurchTools(object):
                         kpp = sd.get('kpp',''),
                         ogrn = sd.get('ogrn',''),
                         address = sd.get('address',''),
-                        winnerIndication = sd.get('winnerind',''),
-                        ordinalNumber = sd.get('lotnumber',''),
-                        guid = sd.get('lotguid',''),
+                        winnerIndication = sd.get('winnerIndication',''),
+                        ordinalNumber = sd.get('ordinalNumber',''),
+                        guid = sd.get('guid',''),
                         protguid = adocs['guid'][i]
                     )
                     self.save_to_ora(lsql2, lbindvar)
+                if (i > 0) and (i % 500 == 0):
+                    self.log(u' Обработано строк: ' + str(i))
 
     def loadxmltoora(self):
         lfz = 'docs223'
@@ -418,6 +406,7 @@ class PurchTools(object):
             for lval in self.__config.items(lfz):
                 ldoc = lfz + '.' + lval[0]
                 lreglist = self.getreglist(ldoc, lftpfz)
+                self.oraconnect('zakupki/dD9qHxQD3t5w@FST_RAC')
                 for reg in lreglist:
                     lftp = self.ftpconnect(lftpfz)
                     ldocs = self.gz_get_ftp_files(lftp, self.__config.get(ldoc, 'ftppath'),
@@ -425,8 +414,9 @@ class PurchTools(object):
                                                   self.__config.get(ldoc, 'fields'),
                                                   lval[0], self.__config.get(ldoc, 'datefrom'),
                                                   self.__config.get(ldoc, 'dateto'), lreglist)
-            self.oraconnect('zakupki/dD9qHxQD3t5w@FST_RAC')
-            self.savedoctoora(ldocs,lval[0])
+                    self.savedoctoora(ldocs,lval[0])
+                    self.log('Документы %s для региона %s загружены в базу за период с %s по %s .'
+                             % (ldoc, reg, self.__config.get(ldoc, 'datefrom'), "{:%Y%m%d}".format(self.__maxdate)))
             if self.__config.get(ldoc, 'dateto') == '*':
                 self.__saveconfig(ldoc,'datefrom',"{:%Y%m%d}".format(self.__maxdate))
                 self.__saveconfig(ldoc, 'dateto', '*')
