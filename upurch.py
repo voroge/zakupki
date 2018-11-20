@@ -185,17 +185,17 @@ class PurchTools(object):
                         namespaces=lnamespaces
                     ),
                     root.xpath(
-                        #ns2:protocolLotApplications[ns2:application] - ищет все тэги protocolLotApplications,
-                        # для которых существует хотя бы один тэг application (нужно, чтобы отсеять,
+                        #ns2:protocolLotApplications[ns2:supplierInfo] - ищет все тэги protocolLotApplications,
+                        # для которых существует хотя бы один тэг supplierInfo (нужно, чтобы отсеять,
                         # когда не подана ни одна заявка)
-                        './/ns2:lotApplicationsList/ns2:protocolLotApplications[ns2:application]/ns2:lot | \
+                        './/ns2:lotApplicationsList/ns2:protocolLotApplications[ns2:supplierInfo]/ns2:lot | \
                          .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo | \
                          .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:name | \
                          .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:inn | \
                          .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:kpp | \
                          .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:ogrn | \
                          .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:supplierInfo/ns:address | \
-                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application/ns2:winnerIndication',
+                         .//ns2:lotApplicationsList/ns2:protocolLotApplications/ns2:application[ns2:supplierInfo]/ns2:winnerIndication',
                         namespaces=lnamespaces
                     )
                 ),
@@ -236,15 +236,16 @@ class PurchTools(object):
         return False
 
     # Загружаем все файлы с ftp госзакупок из подпапки ftp_dir  в локальную папку lxmlpath
-    def gz_get_ftp_files(self, aftp, aftp_dir, axmlpath, afields, adoc, adfrom, adto, aregions=None):
+    def gz_get_ftp_files(self, aftp, aftp_dir, aftp_common_dir, axmlpath, afields, adoc, adfrom, adto, aregions):
+        self.log(u'Начало загрузки XML в DF.')
         # создаем DataFrame для данных контрактов
         docs = pd.DataFrame(columns=afields.split(','))
-        for s in self.get_ftp_dir_list(aftp, "/out/published/"):
+        for s in self.get_ftp_dir_list(aftp, aftp_common_dir):
             i = 0
             # s=get_ftp_dir_list(ftp, "/out/published/")[0]
-            if aregions == None or ((aregions != None) and (s in aregions)):
+            if aregions == '*' or ((aregions != '*') and (s in aregions)):
                 try:
-                    lpath = "/out/published/" + s + aftp_dir
+                    lpath = aftp_common_dir + s + aftp_dir
                     time.asctime(time.localtime(time.time()))
                     self.log('Каталог: ' + s)
                     aftp.cwd(lpath)
@@ -263,7 +264,7 @@ class PurchTools(object):
                                     doc = self.parse_xml(axmlpath + x, adoc)
                                     # Удаляем дубли в списке оквэд
                                     # добавляем имена файлов zip и xml в список
-                                    doc.append(len(doc[3]))
+                                    doc.append(len(doc[6]))
                                     doc.append(f)
                                     doc.append(x)
                                     doc.append(s)
@@ -271,7 +272,7 @@ class PurchTools(object):
                                 os.remove(axmlpath + x)
                                 # удаляем файл архива
                             os.remove(axmlpath + f)
-                            if i % 100 == 0:
+                            if i % 500 == 0:
                                 self.log(' | Обработано ' + str(i) + ' файлов архивов из ' + str(len(lftplist))
                                          + ' (' + str(int(round(float(i) / len(lftplist) * 100))) + '%)')
                 except ftplib.error_perm:
@@ -279,14 +280,14 @@ class PurchTools(object):
         # Могут досылать исправленные данные по контракту в разные дни. Это надо обрабатывать.
         docs = docs.drop_duplicates(['nnumber'], keep='last')
         docs.index = range(len(docs.index))
-        self.log(u'Окончание обработки.')
+        self.log(u'Окончание загрузки XML в DF.')
         return docs
 
     def getreglist(self, adoc, afz):
         llist = self.__config.get(adoc, 'regions').split(',')
-        if llist == '*':
+        if llist[0] == '*':
             lftp = self.ftpconnect(afz)
-            return self.get_ftp_dir_list(lftp, self.__config.get(adoc, 'commonpath'))
+            return self.get_ftp_dir_list(lftp, self.__config.get(afz, 'commonpath'))
         else:
             return llist
 
@@ -338,6 +339,10 @@ class PurchTools(object):
             exit(1)
 
     def savedoctoora(self,adocs, adoctype):
+        if adocs.empty:
+            self.log('Предупреждение! Пустой DF. Нет данных для загрузки в БД.')
+            return False
+        self.log('Начало загрузки DF в БД.')
         if adoctype == 'purchaseprotocol':
             lsql1 = """
                    MERGE INTO PROTOCOLS p
@@ -397,6 +402,20 @@ class PurchTools(object):
                     self.save_to_ora(lsql2, lbindvar)
                 if (i > 0) and (i % 500 == 0):
                     self.log(u' Обработано строк: ' + str(i))
+        self.log('Окончание загрузки DF в БД.')
+        return True
+
+    def __getfromdate(self, adoc, areg):
+        if self.__config.get(adoc, 'use_reg_date')=='1' and self.__config.has_option(adoc+'.regmaxdate', areg):
+            return self.__config.get(adoc+'.regmaxdate', areg)
+        else:
+            return self.__config.get(adoc, 'datefrom')
+
+    def __gettodate(self, adoc, areg):
+        if self.__config.get(adoc, 'use_reg_date')=='1' and self.__config.has_option(adoc+'.regmaxdate', areg):
+            return '*'
+        else:
+            return self.__config.get(adoc, 'dateto')
 
     def loadxmltoora(self):
         lfz = 'docs223'
@@ -410,16 +429,20 @@ class PurchTools(object):
                 for reg in lreglist:
                     lftp = self.ftpconnect(lftpfz)
                     ldocs = self.gz_get_ftp_files(lftp, self.__config.get(ldoc, 'ftppath'),
+                                                  self.__config.get(lftpfz, 'commonpath'),
                                                   self.__config.get('common', 'xmldir'),
                                                   self.__config.get(ldoc, 'fields'),
-                                                  lval[0], self.__config.get(ldoc, 'datefrom'),
-                                                  self.__config.get(ldoc, 'dateto'), lreglist)
-                    self.savedoctoora(ldocs,lval[0])
-                    self.log('Документы %s для региона %s загружены в базу за период с %s по %s .'
-                             % (ldoc, reg, self.__config.get(ldoc, 'datefrom'), "{:%Y%m%d}".format(self.__maxdate)))
-            if self.__config.get(ldoc, 'dateto') == '*':
-                self.__saveconfig(ldoc,'datefrom',"{:%Y%m%d}".format(self.__maxdate))
-                self.__saveconfig(ldoc, 'dateto', '*')
+                                                  lval[0], self.__getfromdate(ldoc, reg),
+                                                  self.__gettodate(ldoc, reg), [reg])
+                    if self.savedoctoora(ldocs,lval[0]):
+                        self.log('Документы %s для региона %s загружены в базу за период с %s по %s .'
+                                 % (ldoc, reg, self.__getfromdate(ldoc, reg), "{:%Y%m%d}".format(self.__maxdate)))
+                        if (self.__config.get(ldoc, 'use_reg_date')=='0' \
+                              and not self.__config.has_option(ldoc+'.regmaxdate', reg)) \
+                              or self.__config.get(ldoc, 'use_reg_date')=='1':
+                            self.__saveconfig(ldoc+'.regmaxdate',reg,"{:%Y%m%d}".format(self.__maxdate))
+                            self.__saveconfig(ldoc, 'use_reg_date', '1')
+                        self.__maxdate = None
             return ldocs
         except configparser.NoOptionError as eo:
             self.log('Ошибка! Некорректный конфигурационный файл settings.ini (' + str(eo.message) + ')')

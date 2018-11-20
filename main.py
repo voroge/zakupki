@@ -3,7 +3,7 @@ import upurch as pc
 
 pt = pc.PurchTools()
 docs = pt.loadxmltoora()
-print(docs)
+#print(docs)
 writer = pd.ExcelWriter('dfdoc.xlsx')
 docs.to_excel(writer)
 writer.save()
